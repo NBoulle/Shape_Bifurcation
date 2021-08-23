@@ -1,0 +1,103 @@
+from firedrake import *
+from fireshape import *
+import ROL
+import numpy as np
+import os
+
+# Load Python files
+from L2tracking_PDEconstraint import Moore_Spence
+from L2tracking_objective import L2trackingObjective
+
+def shape_optimization(domain, branch, target):
+
+    # Setup the initial mesh and problem
+    if domain == "round_square" or domain == "disk":
+        mesh = Mesh('Meshes/%s.msh' % domain)
+    else:
+        raise ValueError("Unknown domain name: %s" % domain)
+
+    # Setup PDE constraint
+    Q = FeControlSpace(mesh)
+    inner = ElasticityInnerProduct(Q)
+    q = ControlVector(Q, inner)
+    mesh_m = Q.mesh_m
+    e = Moore_Spence(mesh_m)
+
+    # Compute the initial guess for the Moore-Spence system using deflation solution
+    e.compute_guess(domain, branch)
+    e.sol_opt.assign(e.solution)
+    print("### initial state found ###")
+
+    # Create directory for saving results
+    directory = "Result"
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+    pvd_path = directory + "/solution/u.pvd"
+    results_path = directory + "/iterations.csv"
+
+    # Save the initial mesh
+    np.savetxt(directory + "/mesh_init.txt", Q.mesh_m.coordinates.dat.data[:,:], delimiter=',')
+
+    # Create PDEconstrained objective functional
+    J_ = L2trackingObjective(e, Q, pvd_path, results_path, target)
+    J = ReducedObjective(J_, e)
+
+    # ROL parameters
+    params_dict = {
+                    'Status Test':{'Gradient Tolerance':1e-6,
+                                   'Step Tolerance':1e-12,
+                                   'Iteration Limit':100},
+                    'Step':{'Type':'Trust Region',
+                            'Trust Region':{'Initial Radius': -1, #determine initial radius with heuristics: -1
+                                            'Maximum Radius':1e8,
+                                            'Subproblem Solver':'Dogleg',
+                                            'Radius Growing Rate':2.5,
+                                            'Step Acceptance Threshold':0.05,
+                                            'Radius Shrinking Threshold':0.05,
+                                            'Radius Growing Threshold':0.9,
+                                            'Radius Shrinking Rate (Negative rho)':0.0625,
+                                            'Radius Shrinking Rate (Positive rho)':0.25,
+                                            'Radius Growing Rate':2.5,
+                                            'Sufficient Decrease Parameter':1e-4,
+                                            'Safeguard Size':100.0,
+                                           }
+                           },
+                    'General':{'Print Verbosity':0, #set to any number >0 for increased verbosity
+                               'Secant':{'Type':'Limited-Memory BFGS', #BFGS-based Hessian-update in trust-region model
+                                         'Maximum Storage':10
+                                        }
+                              }
+                    }
+
+    # Solve the optimization problem
+    params = ROL.ParameterList(params_dict, "Parameters")
+    problem = ROL.OptimizationProblem(J, q)
+    solver = ROL.OptimizationSolver(problem, params)
+    solver.solve()
+
+    # Write final lambda and save the final mesh
+    with e.solution_n.sub(1).dat.vec_ro as x:
+        param = x.norm()
+    print("\nlambda = %e"%param)
+    np.savetxt(directory + "/mesh_final.txt", Q.mesh_m.coordinates.dat.data[:,:], delimiter=',')
+
+if __name__ == "__main__":
+    """
+    Select the initial domain for the Allen-Cahn problem and the branch for the
+    initial guess to be optimized.
+
+    Possible choices are:
+        - domain = "round_square" with branch = 1 or 3
+        - domain = "disk" with branch = 1 or 5
+
+    Set the target bifurcation parameter.
+
+    The default settings correspond to reproducing Fig 6b of the paper.
+    """
+    # Select domain and initial branch
+    domain = "disk"
+    branch = 5
+    target = 20
+
+    # Run the shape optimization
+    shape_optimization(domain, branch, target)
